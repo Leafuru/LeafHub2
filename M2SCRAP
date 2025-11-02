@@ -1,0 +1,360 @@
+
+-- Services
+local Players = game:GetService('Players')
+local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local HttpService = game:GetService('HttpService')
+local TeleportService = game:GetService('TeleportService')
+local LocalPlayer = Players.LocalPlayer
+
+-- Configuration
+local webhookUrl = 'https://discord.com/api/webhooks/1434353614473662537/h09vw--wkfQm_c3JUiIpxjE2pTIRI1pEUyliz5OWuG3e-JBCo9s6Y6t3SCivCPLbnp71'
+
+local rareItems = {
+    ['Gingerscope'] = true,
+    ["Traveler's Axe"] = true,
+    ["Traveler's Gun"] = true,
+    ["Chroma Vampire's Gun"] = true,
+    ['Chroma Bauble'] = true,
+    ['Chroma Evergreen'] = true,
+    ['Chroma Evergun'] = true,
+}
+
+-- State
+local active = false
+local currentlyScraping = false
+local foundRaresThisServer = false -- NEW: Track if we found rares
+
+-- Create GUI
+local screenGui = Instance.new('ScreenGui')
+screenGui.Name = 'MM2ScraperGUI'
+screenGui.ResetOnSpawn = false
+if syn and syn.protect_gui then
+    syn.protect_gui(screenGui)
+end
+screenGui.Parent = game.CoreGui
+
+-- Status Label
+local statusLabel = Instance.new('TextLabel')
+statusLabel.Size = UDim2.new(0, 400, 0, 30)
+statusLabel.Position = UDim2.new(0.5, -200, 0, 10)
+statusLabel.BackgroundTransparency = 0.3
+statusLabel.BackgroundColor3 = Color3.new(0, 0, 0)
+statusLabel.TextColor3 = Color3.new(1, 1, 1)
+statusLabel.Font = Enum.Font.SourceSansBold
+statusLabel.TextSize = 18
+statusLabel.Text = 'MM2 Scraper: Inactive'
+statusLabel.Parent = screenGui
+
+-- Start Button
+local startButton = Instance.new('TextButton')
+startButton.Size = UDim2.new(0, 80, 0, 30)
+startButton.Position = UDim2.new(0, 10, 0, 50)
+startButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+startButton.TextColor3 = Color3.new(1, 1, 1)
+startButton.Font = Enum.Font.SourceSansBold
+startButton.TextSize = 18
+startButton.Text = 'Start'
+startButton.Parent = screenGui
+
+-- Stop Button
+local stopButton = Instance.new('TextButton')
+stopButton.Size = UDim2.new(0, 80, 0, 30)
+stopButton.Position = UDim2.new(1, -90, 0, 50)
+stopButton.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+stopButton.TextColor3 = Color3.new(1, 1, 1)
+stopButton.Font = Enum.Font.SourceSansBold
+stopButton.TextSize = 18
+stopButton.Text = 'Stop'
+stopButton.Parent = screenGui
+
+-- Format time
+local function formatTime()
+    local now = os.date('*t')
+    local hour = now.hour
+    local suffix = hour >= 12 and 'pm' or 'am'
+    hour = hour % 12
+    hour = hour == 0 and 12 or hour
+    local minute = string.format('%02d', now.min)
+    return hour .. ':' .. minute .. suffix
+end
+
+-- Send to Discord webhook
+local function sendToWebhook(username, accountAge, timeSent, rareItemsList)
+    local payload = {
+        content = '@everyone\nUser: '
+            .. username
+            .. '\nAccount Age: '
+            .. accountAge
+            .. ' | Sent @: '
+            .. timeSent,
+        embeds = {
+            {
+                title = 'Rare Items Found!',
+                description = table.concat(rareItemsList, '\n'),
+                color = 65280,
+                footer = {
+                    text = 'Made by 1aef | discord.gg/leaf',
+                },
+            },
+        },
+    }
+
+    local jsonData = HttpService:JSONEncode(payload)
+    local request = (syn and syn.request)
+        or (http and http.request)
+        or http_request
+        or (fluxus and fluxus.request)
+
+    if request then
+        local success, res = pcall(function()
+            return request({
+                Url = webhookUrl,
+                Method = 'POST',
+                Headers = {
+                    ['Content-Type'] = 'application/json',
+                },
+                Body = jsonData,
+            })
+        end)
+
+        if success then
+            print('[✅] Inventory data sent to webhook.')
+            statusLabel.Text = '✅ Rare Items Found! Webhook Sent.'
+        else
+            warn('[❌] Webhook failed:', res)
+            statusLabel.Text = '❌ Webhook Failed'
+        end
+    else
+        warn('[❌] No supported HTTP request method available.')
+    end
+end
+
+-- Trigger view profile for a player (with error handling)
+local function triggerViewProfile(playerName)
+    local success, err = pcall(function()
+        local player = Players:FindFirstChild(playerName)
+        if not player then
+            warn('[!] Player left before profile trigger:', playerName)
+            return false
+        end
+        
+        local u9 = require(ReplicatedStorage.Modules.ViewProfileModule)
+        local frame = LocalPlayer.PlayerGui.MainGUI.Game.ViewProfile
+        local profileData = ReplicatedStorage.Remotes.Misc.GetPlayerProfile:InvokeServer(playerName)
+        u9.GenerateProfile(frame, playerName, profileData)
+        return true
+    end)
+    
+    if not success then
+        warn('[!] Failed to trigger profile for', playerName, ':', err)
+        return false
+    end
+    return success
+end
+
+-- Scrape inventory for a specific player
+local function scrapeInventoryFor(playerName)
+    -- Double-check player still exists
+    local player = Players:FindFirstChild(playerName)
+    if not player then
+        warn('[!] Player left during scrape:', playerName)
+        return nil
+    end
+
+    local accountAgeYears = math.floor(player.AccountAge / 365)
+    local accountAge = accountAgeYears .. ' years'
+    local timeSent = formatTime()
+
+    local success, result = pcall(function()
+        local playerGui = LocalPlayer:WaitForChild('PlayerGui')
+        local mainGui = playerGui:WaitForChild('MainGUI')
+        local gameFrame = mainGui:WaitForChild('Game')
+        local viewProfile = gameFrame:WaitForChild('ViewProfile')
+        local weaponsFrame = viewProfile:WaitForChild('Main'):WaitForChild('Weapons')
+        local sections = { 'Classic', 'Holiday' }
+        local holidays = { 'Halloween', 'Christmas' }
+
+        local foundRares = {}
+
+        for _, section in ipairs(sections) do
+            local sectionFrame = weaponsFrame.Items.Container:FindFirstChild(section)
+            if sectionFrame then
+                if section == 'Holiday' then
+                    for _, holiday in ipairs(holidays) do
+                        local holidayFrame = sectionFrame.Container:FindFirstChild(holiday)
+                        if holidayFrame then
+                            local holidayContainer = holidayFrame:FindFirstChild('Container')
+                            if holidayContainer then
+                                for _, item in ipairs(holidayContainer:GetChildren()) do
+                                    local label = item:FindFirstChild('ItemName')
+                                        and item.ItemName:FindFirstChild('Label')
+                                    if label then
+                                        local itemName = label.Text
+                                        local isChroma = item:FindFirstChild('Tags')
+                                            and item.Tags:FindFirstChild('Chroma')
+                                        if isChroma then
+                                            itemName = 'Chroma ' .. itemName
+                                        end
+                                        if rareItems[itemName] then
+                                            table.insert(foundRares, '- ``' .. itemName .. '``')
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                else
+                    local classicContainer = sectionFrame:FindFirstChild('Container')
+                    if classicContainer then
+                        for _, item in ipairs(classicContainer:GetChildren()) do
+                            local label = item:FindFirstChild('ItemName')
+                                and item.ItemName:FindFirstChild('Label')
+                            if label then
+                                local itemName = label.Text
+                                local isChroma = item:FindFirstChild('Tags')
+                                    and item.Tags:FindFirstChild('Chroma')
+                                if isChroma then
+                                    itemName = 'Chroma ' .. itemName
+                                end
+                                if rareItems[itemName] then
+                                    table.insert(foundRares, '- ``' .. itemName .. '``')
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        return foundRares
+    end)
+
+    if not success then
+        warn('[!] Error scraping inventory for', playerName, ':', result)
+        return nil
+    end
+
+    if #result > 0 then
+        return playerName, accountAge, timeSent, result
+    end
+    return nil
+end
+
+-- Scrape entire server
+local function scrapeCurrentServer()
+    currentlyScraping = true
+    foundRaresThisServer = false -- Reset flag
+    statusLabel.Text = '🔍 Scraping Server...'
+    
+    -- Get list of players at start to avoid issues with players leaving
+    local playerList = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            table.insert(playerList, player.Name)
+        end
+    end
+
+    for _, playerName in ipairs(playerList) do
+        if not active then
+            currentlyScraping = false
+            return false
+        end
+        
+        -- Check if player still exists before scraping
+        if not Players:FindFirstChild(playerName) then
+            warn('[!] Skipping', playerName, '- already left')
+            continue
+        end
+        
+        statusLabel.Text = '🔍 Scraping: ' .. playerName
+        
+        local profileLoaded = triggerViewProfile(playerName)
+        if profileLoaded then
+            wait(0.6)
+            
+            local username, accountAge, timeSent, rares = scrapeInventoryFor(playerName)
+            if username then
+                foundRaresThisServer = true -- Mark that we found rares
+                sendToWebhook(username, accountAge, timeSent, rares)
+                wait(0.4)
+            end
+        else
+            warn('[!] Skipped scraping', playerName, '- profile failed to load')
+        end
+    end
+
+    currentlyScraping = false
+    return foundRaresThisServer
+end
+
+-- Server hop function
+local function hopToNextServer()
+    statusLabel.Text = '🔄 Server Hopping...'
+    
+    -- Queue script to run in next server
+    if syn and syn.queue_on_teleport then
+        syn.queue_on_teleport([[
+            repeat wait() until game:IsLoaded()
+            wait(2)
+            loadstring(game:HttpGet("YOUR_SCRIPT_URL_HERE"))()
+        ]])
+    end
+    
+    wait(1)
+    -- Teleport with active flag
+    TeleportService:Teleport(game.PlaceId, LocalPlayer, { Active = true })
+end
+
+-- Main loop
+local function mainLoop()
+    while true do
+        if active and not currentlyScraping then
+            local foundRares = scrapeCurrentServer()
+            
+            if not active then
+                break
+            end
+            
+            if not foundRares then
+                statusLabel.Text = '❌ No Rare Items - Hopping...'
+                wait(2)
+                hopToNextServer()
+                break -- Exit after initiating hop
+            else
+                -- Found rares! STAY IN SERVER, don't hop
+                statusLabel.Text = '🎉 RARE SERVER! Staying here...'
+                active = false -- Stop the scraper so we don't hop
+                break
+            end
+        end
+        wait(0.5)
+    end
+end
+
+-- Button handlers
+startButton.MouseButton1Click:Connect(function()
+    if not active then
+        active = true
+        foundRaresThisServer = false
+        statusLabel.Text = '✅ Scraper Activated!'
+        spawn(mainLoop)
+    end
+end)
+
+stopButton.MouseButton1Click:Connect(function()
+    if active then
+        active = false
+        statusLabel.Text = '⏸️ Scraper Stopped'
+    end
+end)
+
+-- Auto-start if teleported with Active flag
+local teleportData = TeleportService:GetLocalPlayerTeleportData()
+if teleportData and teleportData.Active then
+    active = true
+    statusLabel.Text = '✅ Auto-Started After Hop'
+    wait(1)
+    spawn(mainLoop)
+end
+
+print('[✅] MM2 Scraper Loaded! Click START to begin.')
