@@ -296,7 +296,7 @@ local function hopToNextServer()
         syn.queue_on_teleport([[
             repeat wait() until game:IsLoaded()
             wait(2)
-            loadstring(game:HttpGet("YOUR_SCRIPT_URL_HERE"))()
+            loadstring(game:HttpGet("https://raw.githubusercontent.com/Leafuru/LeafHub2/refs/heads/main/M2SCRAP"))()
         ]])
     end
     
